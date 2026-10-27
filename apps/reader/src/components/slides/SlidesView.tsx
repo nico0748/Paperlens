@@ -36,6 +36,7 @@ import {
   nextIndex,
   normalizeRect,
   overlapRatio,
+  withScript,
 } from "../../lib/slides.ts";
 import { setSentenceFocus, useSentenceFocus } from "../../lib/sentenceFocus.ts";
 import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../../lib/sentencesView.ts";
@@ -213,7 +214,7 @@ export function SlidesView(props: Props) {
       ) : !props.paperPdf ? (
         <div className="drop-hint" aria-busy="true"><h2>論文を読み込んでいます</h2></div>
       ) : presenter.open ? (
-        <ScriptView deck={s.deck} presenter={presenter} />
+        <ScriptView deck={s.deck} presenter={presenter} onScript={(page, text) => slides.update((d) => ({ ...d, scripts: withScript(d.scripts, page, text) }))} />
       ) : (
         <Split
           {...props}
@@ -927,7 +928,7 @@ function Split({
             <X size={14} aria-hidden="true" /> 発表を終える
           </button>
         ) : canOpenPresenter && !fullscreen ? (
-          <button className="btn text sm sv-fs-btn" title="スライドと論文を別の窓に全画面で映し、この窓に台本（グループのメモとリンク）を出す（P）" onClick={onFullscreen}>
+          <button className="btn text sm sv-fs-btn" title="スライドと論文を別の窓に全画面で映し、この窓に台本とグループのリンクを並べて出す（P）" onClick={onFullscreen}>
             <Presentation size={14} aria-hidden="true" /> 発表
           </button>
         ) : (

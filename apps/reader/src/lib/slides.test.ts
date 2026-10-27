@@ -19,6 +19,7 @@ import {
   renderSlideLinks,
   restoreLink,
   restoreMarkup,
+  scriptOf,
 } from "./slides.ts";
 import { MemoryVault } from "./vault.ts";
 
@@ -278,4 +279,38 @@ test("読めない slides.json は空として扱わず、書き込みを止め�
   await assert.rejects(loadDeck(v, id), /JSON として読めません/);
   await assert.rejects(changeMarkups(v, id, [{ op: "add", item: mk(1, 1) }]), /JSON として読めません/);
   assert.equal(await v.readText(`papers/${id}/slides.json`), '{"markups": [');
+});
+
+test("台本: ページごとに書き、空にしたページは消す。差分は書き換えたページだけ", () => {
+  const base = deckOf([mk(1, 1)]);
+  const a = applyMarkupOps(base, [{ op: "setScript", page: 2, text: "背景を話す" }, { op: "setScript", page: 1, text: "挨拶" }]);
+  assert.deepEqual(a.scripts, { "1": "挨拶", "2": "背景を話す" });
+  assert.equal(scriptOf(a, 3), "");
+  const b = applyMarkupOps(a, [{ op: "setScript", page: 1, text: "" }]);
+  assert.deepEqual(b.scripts, { "2": "背景を話す" });
+  assert.deepEqual(applyMarkupOps(b, [{ op: "setScript", page: 2, text: "" }]).scripts, undefined);
+  assert.deepEqual(diffMarkups(a, b), [{ op: "setScript", page: 1, text: "" }]);
+  // 別の書き手が別のページの台本を書いても消し合わない
+  const theirs = applyMarkupOps(a, [{ op: "setScript", page: 3, text: "まとめ" }]);
+  assert.deepEqual(applyMarkupOps(theirs, diffMarkups(a, b)).scripts, { "2": "背景を話す", "3": "まとめ" });
+});
+
+test("台本の操作を確かめる", () => {
+  assert.deepEqual(parseMarkupOps([{ op: "setScript", page: 2, text: "x" }]), [{ op: "setScript", page: 2, text: "x" }]);
+  assert.throws(() => parseMarkupOps([{ op: "setScript", page: 0, text: "x" }]), /page/);
+  assert.throws(() => parseMarkupOps([{ op: "setScript", page: 1 }]), /text/);
+});
+
+test("台本は保存して読み直せる。差し替えても残り、発表者ノートは台本の無いページにだけ入る", async () => {
+  const v = new MemoryVault();
+  const id = await importPaper(v, "paper.pdf", PDF, "Paper");
+  await putSlides(v, id, "talk.pdf", PDF);
+  await changeMarkups(v, id, [{ op: "setScript", page: 1, text: "自分で書いた台本" }]);
+  assert.deepEqual((await loadDeck(v, id))?.scripts, { "1": "自分で書いた台本" });
+  const again = await putSlides(v, id, "talk.pptx", PDF, PDF, ["ノート1", "", " ノート3 "]);
+  assert.deepEqual(again.scripts, { "1": "自分で書いた台本", "3": "ノート3" });
+  // 手で壊した台本は読まない
+  const raw = JSON.parse(await v.readText(`papers/${id}/slides.json`));
+  await v.writeText(`papers/${id}/slides.json`, JSON.stringify({ ...raw, scripts: { "0": "x", a: "y", "2": 3, "4": "ok", "5": " " } }));
+  assert.deepEqual((await loadDeck(v, id))?.scripts, { "4": "ok" });
 });

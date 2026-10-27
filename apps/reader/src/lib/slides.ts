@@ -3,7 +3,7 @@
 //   papers/<論文ID>/
 //     slides.pdf     表示に使うスライド（PPTX は取り込むときに PDF へ変換する）
 //     slides.pptx    PPTX から取り込んだときの元のファイル（残すだけで、表示には使わない）
-//     slides.json    スライドを四角で囲んだ部分（マークアップ）と、論文の該当箇所へのリンク
+//     slides.json    スライドを四角で囲んだ部分（マークアップ）と、論文の該当箇所へのリンク、スライドごとの台本
 //
 // マークアップは「スライドのページ番号.そのページで何個目か」で呼ぶ（Markup-03.02 = 3 ページ目の 2 個目）。
 // 番号は作ったときに決めて変えない。途中のものを消しても、ほかの名前はずれない（ノートや会話で名前を使うため）。
@@ -57,6 +57,9 @@ export interface SlideDeck {
   /** 以前の版が書いていた、ページごとに使った最大の番号。今は読まない（消した番号を使い直すため） */
   used?: Record<string, number>;
   markups: SlideMarkup[];
+  /** スライドごとの台本（話すこと）。キーはスライドのページ番号（"1" から）。空の台本は持たない。
+   *  発表中に元の窓でグループのリンクと並べて出す。PPTX から取り込んだときは、発表者ノートを入れる */
+  scripts?: Record<string, string>;
 }
 
 /** グループの色。白い紙（スライドと論文のページ）の上に描くので、明暗の表示で共通の値にする。
@@ -95,6 +98,17 @@ export function nextIndex(markups: SlideMarkup[], page: number) {
 export function nextColor(markups: SlideMarkup[]) {
   const used = GROUP_COLORS.map((_, i) => markups.filter((m) => m.color === i).length);
   return used.indexOf(Math.min(...used));
+}
+
+/** そのページの台本（無ければ空） */
+export const scriptOf = (deck: Pick<SlideDeck, "scripts">, page: number) => deck.scripts?.[String(page)] ?? "";
+
+/** 台本の書き込み。空にしたページはキーごと消す（空白だけの台本は、書いている途中なので残す。読み直すときに捨てる） */
+export function withScript(scripts: SlideDeck["scripts"], page: number, text: string): Record<string, string> {
+  const out = { ...scripts };
+  if (text) out[String(page)] = text;
+  else delete out[String(page)];
+  return out;
 }
 
 /** スライドの並び順（ページ、番号の順） */
@@ -170,11 +184,18 @@ export type MarkupOp =
   | { op: "remove"; id: string }
   | { op: "addLink"; id: string; link: SlideLink }
   | { op: "updateLink"; id: string; link: string; patch: LinkPatch }
-  | { op: "removeLink"; id: string; link: string };
+  | { op: "removeLink"; id: string; link: string }
+  /** スライドのページの台本を置き換える（空なら消す）。ページごとに書くので、別のページの台本は消し合わない */
+  | { op: "setScript"; page: number; text: string };
 
 export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
   const list = [...deck.markups];
+  let scripts = deck.scripts;
   for (const op of ops) {
+    if (op.op === "setScript") {
+      scripts = withScript(scripts, op.page, op.text);
+      continue;
+    }
     const id = op.op === "add" || op.op === "restore" ? op.item.id : op.id;
     const i = list.findIndex((m) => m.id === id);
     if (op.op === "add" || op.op === "restore") {
@@ -195,8 +216,8 @@ export function applyMarkupOps(deck: SlideDeck, ops: MarkupOp[]): SlideDeck {
     } else if (op.op === "updateLink") list[i] = { ...m, links: m.links.map((l) => (l.id === op.link ? { ...l, ...op.patch } : l)) };
     else list[i] = { ...m, links: m.links.filter((l) => l.id !== op.link) };
   }
-  const { used: _old, ...rest } = deck;
-  return { ...rest, markups: list };
+  const { used: _old, scripts: _s, ...rest } = deck;
+  return { ...rest, markups: list, ...(scripts && Object.keys(scripts).length ? { scripts } : {}) };
 }
 
 /** 消したグループを、消す前の位置（at 番目）に同じ ID・リンクのまま戻す。既にあれば何もしない。
@@ -248,6 +269,10 @@ export function diffMarkups(base: SlideDeck, next: SlideDeck, restored: Readonly
       if (JSON.stringify(o.rects) !== JSON.stringify(l.rects)) lp.rects = l.rects;
       if (Object.keys(lp).length) ops.push({ op: "updateLink", id: m.id, link: l.id, patch: lp });
     }
+  }
+  for (const page of new Set([...Object.keys(base.scripts ?? {}), ...Object.keys(next.scripts ?? {})])) {
+    const text = scriptOf(next, Number(page));
+    if (scriptOf(base, Number(page)) !== text) ops.push({ op: "setScript", page: Number(page), text });
   }
   return ops;
 }
@@ -338,10 +363,20 @@ export function parseMarkupOps(raw: unknown): MarkupOp[] {
       }
       case "removeLink":
         return { op: "removeLink", id: str(o.id, "id"), link: str(o.link, "link") };
+      case "setScript":
+        return { op: "setScript", page: posInt(o.page, "page"), text: str(o.text, "text") };
       default:
-        return bad(`op は add / restore / update / remove / addLink / updateLink / removeLink のどれかです（${String(o.op)}）。`);
+        return bad(`op は add / restore / update / remove / addLink / updateLink / removeLink / setScript のどれかです（${String(o.op)}）。`);
     }
   });
+}
+
+/** 台本はページ番号（1 以上の整数）のキーと、空でない文字列だけを読む */
+function tidyScripts(raw: unknown): Record<string, string> | undefined {
+  if (!isObj(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) if (/^[1-9]\d*$/.test(k) && typeof v === "string" && v.trim()) out[k] = v;
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** 手で書き換えられた slides.json でも読めるよう、壊れたグループとリンクは捨てる */
@@ -385,8 +420,9 @@ export async function loadDeck(vault: Vault, id: string): Promise<SlideDeck | nu
     throw new Error(`${slidesDataPath(id)} を JSON として読めません。手で直すか、ファイルを消してから開き直してください。`);
   }
   // 以前の版の used（使った最大の番号）は読まない。次に書くときに消える
-  const { used: _old, ...rest } = isObj(raw) ? raw : ({} as Partial<SlideDeck>);
-  return { ...emptyDeck("slides.pdf"), ...rest, version: 1, markups: tidyMarkups(raw?.markups) };
+  const { used: _old, scripts: rawScripts, ...rest } = isObj(raw) ? raw : ({} as Partial<SlideDeck>);
+  const scripts = tidyScripts(rawScripts);
+  return { ...emptyDeck("slides.pdf"), ...rest, version: 1, markups: tidyMarkups(raw?.markups), ...(scripts ? { scripts } : {}) };
 }
 
 export function loadSlidesPdf(vault: Vault, id: string) {
@@ -401,10 +437,11 @@ function serial<T>(key: string, job: () => Promise<T>): Promise<T> {
 }
 
 /**
- * スライドを置く。既にあれば差し替え、マークアップは残す（スライドを少し直して入れ直す使い方のため）。
+ * スライドを置く。既にあれば差し替え、マークアップと台本は残す（スライドを少し直して入れ直す使い方のため）。
  * pdf は表示に使う PDF。original は PPTX から変換したときの元のファイル。
+ * notes は PPTX の発表者ノート（スライドの順）。台本がまだ無いページにだけ入れる（書いた台本を上書きしない）。
  */
-export async function putSlides(vault: Vault, id: string, fileName: string, pdf: ArrayBuffer, original?: ArrayBuffer) {
+export async function putSlides(vault: Vault, id: string, fileName: string, pdf: ArrayBuffer, original?: ArrayBuffer, notes?: string[]) {
   if (!new TextDecoder().decode(new Uint8Array(pdf.slice(0, 5))).startsWith("%PDF")) {
     throw new Error("スライドは PDF か PPTX で指定してください。");
   }
@@ -412,7 +449,15 @@ export async function putSlides(vault: Vault, id: string, fileName: string, pdf:
     const prev = await loadDeck(vault, id);
     await vault.writeBinary(slidesPdfPath(id), pdf);
     if (original) await vault.writeBinary(slidesSourcePath(id), original);
-    const deck: SlideDeck = { ...emptyDeck(fileName, original ? "pptx" : undefined), markups: prev?.markups ?? [] };
+    let scripts = prev?.scripts;
+    notes?.forEach((t, i) => {
+      if (t.trim() && !scriptOf({ scripts }, i + 1).trim()) scripts = withScript(scripts, i + 1, t.trim());
+    });
+    const deck: SlideDeck = {
+      ...emptyDeck(fileName, original ? "pptx" : undefined),
+      markups: prev?.markups ?? [],
+      ...(scripts && Object.keys(scripts).length ? { scripts } : {}),
+    };
     await vault.writeText(slidesDataPath(id), JSON.stringify(deck, null, 2));
     return deck;
   });

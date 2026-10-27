@@ -29,6 +29,7 @@ import {
   nextIndex,
   normalizeRect,
   rectOf,
+  scriptOf,
   slidesPdfPath,
   sortMarkups,
 } from "../src/lib/slides.ts";
@@ -88,6 +89,7 @@ export const SLIDE_READ_TOOLS: Tool[] = [
         "論文に付けた発表スライドで、四角で囲んだ部分（グループ）の一覧を返します。名前は Markup-ページ.番号 です。" +
         "rect はスライドのページに対する割合、color は色の番号（colorHex がその色）、slideText は四角の中にある文字（画像だけなら空。そのときは get_page_image を source=\"slides\" で呼んで見ます）、links は論文の該当箇所（文章・図・数式）です。" +
         "slidePages はスライドのページ数で、差し替えでページが減ってページの外になったグループには outOfRange: true が付きます。" +
+        "scripts はスライドごとの台本（キーはスライドのページ番号。台本の無いページは入りません）で、set_slide_script で書きます。" +
         "リンクのないグループは、論文を find_in_paper や read_paper_text で読んで link_slide_markup でつないでください。",
       inputSchema: { paper: PAPER },
       annotations: { readOnlyHint: true },
@@ -101,6 +103,7 @@ export const SLIDE_READ_TOOLS: Tool[] = [
         convertedFrom: deck.convertedFrom,
         importedAt: deck.importedAt,
         slidePages,
+        scripts: deck.scripts ?? {},
         markups: sortMarkups(deck.markups).map((m) => ({
           name: markupName(m),
           id: m.id,
@@ -341,6 +344,32 @@ export const SLIDE_WRITE_TOOLS: Tool[] = [
       annotations: { readOnlyHint: false, idempotentHint: true },
     },
     handler: async ({ paper, markup, memo }) => updateMarkup(paper, markup, { memo }),
+  },
+  {
+    name: "set_slide_script",
+    config: {
+      title: "スライドの台本を書く",
+      description:
+        "スライドの 1 ページ分の台本（発表で話すこと）を書き換えます。空の文字列で消します。" +
+        "台本は発表中に元の窓で、そのページのグループとリンクの横に出ます。PPTX から取り込んだときは発表者ノートが入っています。" +
+        "今の台本は get_slide_markups の scripts で読めます。",
+      inputSchema: {
+        paper: PAPER,
+        slidePage: z.number().int().min(1).describe("スライドのページ番号（1 から）"),
+        text: z.string().describe("そのページの台本。前の内容を丸ごと置き換えます"),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: true },
+    },
+    handler: async ({ paper, slidePage, text }) => {
+      const { v } = await deckOf(paper);
+      const r = await changeMarkups(v, paper, [{ op: "setScript", page: slidePage, text }]);
+      const slidePages = await pagesOf(v, paper);
+      return json({
+        slidePage,
+        script: scriptOf(r.deck, slidePage),
+        ...(slidePages !== null && slidePage > slidePages ? { warning: `スライドは ${slidePages} ページです。このページはスライドにありません。` } : {}),
+      });
+    },
   },
   {
     name: "delete_slide_markup",

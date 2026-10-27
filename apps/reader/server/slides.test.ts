@@ -294,8 +294,21 @@ test("MCP: スライドの道具は読み取りと書き込みに分かれてい
   const read = READ_TOOLS.map((t) => t.name);
   const write = WRITE_TOOLS.map((t) => t.name);
   for (const n of ["get_slide_markups", "read_slide_text"]) assert.ok(read.includes(n) && !write.includes(n), n);
-  for (const n of ["import_slides", "add_slide_markup", "link_slide_markup", "update_slide_link", "unlink_slide_markup", "update_slide_markup", "set_slide_markup_memo", "delete_slide_markup", "restore_slide_markup"]) {
+  for (const n of ["import_slides", "add_slide_markup", "link_slide_markup", "update_slide_link", "unlink_slide_markup", "update_slide_markup", "set_slide_markup_memo", "set_slide_script", "delete_slide_markup", "restore_slide_markup"]) {
     assert.ok(write.includes(n) && !read.includes(n), n);
   }
   assert.equal(TOOLS.find((t) => t.name === "delete_slide_markup")!.config.annotations.destructiveHint, true);
+});
+
+test("MCP: 台本を書いて、get_slide_markups の scripts で読める。PPTX の発表者ノートが台本に入る", async () => {
+  const { samplePptx } = await import("./pptxFixture.ts");
+  const v = new NodeVault(data);
+  await importSlides(v, id, "talk.pptx", samplePptx(), async () => slides.buffer.slice(slides.byteOffset, slides.byteOffset + slides.byteLength) as ArrayBuffer);
+  assert.deepEqual((await tool("get_slide_markups", { paper: id })).scripts["1"], "最初に背景を話す\nQ & A は最後");
+  const r = await tool("set_slide_script", { paper: id, slidePage: 2, text: "手法の要点を 30 秒で" });
+  assert.equal(r.script, "手法の要点を 30 秒で");
+  assert.equal(r.warning, undefined);
+  assert.match((await tool("set_slide_script", { paper: id, slidePage: 9, text: "x" })).warning, /2 ページ/);
+  await tool("set_slide_script", { paper: id, slidePage: 9, text: "" });
+  assert.deepEqual(Object.keys((await tool("get_slide_markups", { paper: id })).scripts), ["1", "2"]);
 });
