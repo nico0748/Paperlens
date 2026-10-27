@@ -628,6 +628,24 @@ try {
     await page.locator(".sc-group.is-active .sc-name", { hasText: name }).waitFor({ timeout: 5000 });
   });
 
+  await step("発表: 発表の窓に補足情報の面があり、] で論文の右に補足情報が出て、[ でスライドに戻る", async () => {
+    const info = pop.locator("#sv-pane-info");
+    await info.waitFor({ state: "attached", timeout: 5000 }).catch(() => fail("発表の窓に補足情報の面がありません"));
+    await pop.mouse.move(800, 500);
+    await pop.keyboard.press("]");
+    await pop.waitForFunction(() => document.querySelector("#sv-pane-info")?.getAttribute("aria-hidden") !== "true" && document.querySelector("#sv-pane-slides")?.getAttribute("aria-hidden") === "true", null, { timeout: 5000 })
+      .catch(() => fail("] で補足情報の面に切り替わりません"));
+    await info.locator('[role="tab"]').first().waitFor({ timeout: 5000 }).catch(() => fail("補足情報のタブが出ていません"));
+    // めくり終えると、補足情報の面は窓の右端に収まる
+    await pop
+      .waitForFunction(() => Math.abs(document.querySelector("#sv-pane-info").getBoundingClientRect().right - innerWidth) < 2, null, { timeout: 5000 })
+      .catch(async () => fail(`補足情報の面が窓に収まっていません（右端 ${await info.evaluate((e) => e.getBoundingClientRect().right)} / ${await pop.evaluate(() => innerWidth)}）`));
+    await pop.screenshot({ path: path.join(shotDir, "slides-presenter-info.png") });
+    await pop.keyboard.press("[");
+    await pop.waitForFunction(() => document.querySelector("#sv-pane-slides")?.getAttribute("aria-hidden") !== "true", null, { timeout: 5000 })
+      .catch(() => fail("[ でスライドの面に戻りません"));
+  });
+
   await step("発表: 台本とグループのリンクが並び、エージェントが書いた台本が出る。台本はその場で書けて保存される", async () => {
     await fetch(`${base}/api/papers/${id}/slides/markups`, {
       method: "PATCH",
