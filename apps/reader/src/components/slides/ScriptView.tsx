@@ -1,22 +1,23 @@
-// 発表中に元の窓に出す台本。グループのメモと、リンクした論文の箇所を、スライドの順に並べる。
-// 発表の窓が映しているスライドのページに印を付け、そこまで送る。
+// 発表中に元の窓に出す台本。スライドの順に、左にそのスライドの台本（話すこと）、右にグループのメモと
+// リンクした論文の箇所を並べる。発表の窓が映しているスライドのページに印を付け、そこまで送る。
+// - 台本はここでそのまま書ける（slides.json の scripts に保存。PPTX の発表者ノートは取り込むときに入る）
 // - ページの見出しを押すと、発表の窓のスライドをそのページへ動かす（← / → / PageUp / PageDown でも前後へ）
 // - グループやリンクを押すと、発表の窓でそのグループを選び、論文の該当箇所を見せる
-// 読むだけの画面にする（メモを直すのは右サイドバーの一覧で行う）。
+// グループのメモは読むだけにする（直すのは右サイドバーの一覧で行う）。
 
 import { ChevronLeft, ChevronRight, Presentation, X } from "lucide-react";
 import { type CSSProperties, useEffect, useMemo, useRef } from "react";
-import { GROUP_COLORS, LINK_KIND_LABEL, type SlideDeck, markupName, sortMarkups } from "../../lib/slides.ts";
+import { GROUP_COLORS, LINK_KIND_LABEL, type SlideDeck, markupName, scriptOf, sortMarkups } from "../../lib/slides.ts";
 import type { Presenter } from "./usePresenter.ts";
 
-export function ScriptView({ deck, presenter }: { deck: SlideDeck; presenter: Presenter }) {
+export function ScriptView({ deck, presenter, onScript }: { deck: SlideDeck; presenter: Presenter; onScript: (page: number, text: string) => void }) {
   const { page, count } = presenter;
   const byPage = useMemo(() => {
     const m = new Map<number, SlideDeck["markups"]>();
     for (const g of sortMarkups(deck.markups)) m.set(g.page, [...(m.get(g.page) ?? []), g]);
     return m;
   }, [deck.markups]);
-  const last = Math.max(count, ...deck.markups.map((m) => m.page), 1);
+  const last = Math.max(count, ...deck.markups.map((m) => m.page), ...Object.keys(deck.scripts ?? {}).map(Number), 1);
   const pages = Array.from({ length: last }, (_, i) => i + 1);
 
   // 映しているページを上に送る
@@ -62,7 +63,9 @@ export function ScriptView({ deck, presenter }: { deck: SlideDeck; presenter: Pr
           <ChevronRight size={16} aria-hidden="true" />
         </button>
         <span className="spacer" />
-        <span className="sc-sub">グループ {deck.markups.length}・リンク {deck.markups.reduce((n, m) => n + m.links.length, 0)}</span>
+        <span className="sc-sub">
+          台本 {Object.keys(deck.scripts ?? {}).length}・グループ {deck.markups.length}・リンク {deck.markups.reduce((n, m) => n + m.links.length, 0)}
+        </span>
         <button className="btn text sm" title="発表の窓を閉じて、スライドと論文の画面に戻る（P）" onClick={presenter.stop}>
           <X size={14} aria-hidden="true" /> 発表を終える
         </button>
@@ -78,41 +81,57 @@ export function ScriptView({ deck, presenter }: { deck: SlideDeck; presenter: Pr
                 {here && <span className="sc-now">表示中</span>}
                 {count > 0 && p > count && <span className="mp-orphan">スライドに無いページ</span>}
               </button>
-              {!groups.length ? (
-                <p className="sc-none">このページのグループはありません</p>
-              ) : (
-                <ol className="sc-groups">
-                  {groups.map((m) => (
-                    <li
-                      key={m.id}
-                      className={`sc-group${m.id === presenter.active ? " is-active" : ""}`}
-                      style={{ "--g": GROUP_COLORS[m.color % GROUP_COLORS.length] } as CSSProperties}
-                    >
-                      <button className="sc-group-head" onClick={() => presenter.focus(m.id)} title="発表の窓でこのグループを選び、論文の該当箇所を見せる">
-                        <span className="mu-dot" aria-hidden="true" />
-                        <span className="sc-name">{markupName(m)}</span>
-                        <span className="sc-meta">リンク {m.links.length}</span>
-                      </button>
-                      {m.memo.trim() ? <p className="sc-memo">{m.memo.trim()}</p> : <p className="sc-none">メモはありません</p>}
-                      {m.links.length > 0 && (
-                        <ul className="sc-links">
-                          {[...m.links]
-                            .sort((a, b) => a.page - b.page || (a.rects[0]?.y ?? 0) - (b.rects[0]?.y ?? 0))
-                            .map((l) => (
-                              <li key={l.id}>
-                                <button className="sc-link" onClick={() => presenter.focus(m.id, l.id)} title="発表の窓で論文のこの箇所を見せる">
-                                  <span className="sc-kind">{LINK_KIND_LABEL[l.kind]}</span>
-                                  <span className="mp-page">p.{l.page}</span>
-                                  <span className="sc-text">{l.text || `（${LINK_KIND_LABEL[l.kind]}の範囲）`}</span>
-                                </button>
-                              </li>
-                            ))}
-                        </ul>
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              )}
+              <div className="sc-cols">
+                <div className="sc-script">
+                  <label className="sc-col-title" htmlFor={`sc-script-${p}`}>台本</label>
+                  <textarea
+                    id={`sc-script-${p}`}
+                    className="sc-script-text"
+                    value={scriptOf(deck, p)}
+                    placeholder="このスライドで話すことを書いておけます"
+                    spellCheck={false}
+                    onChange={(e) => onScript(p, e.target.value)}
+                  />
+                </div>
+                <div className="sc-links-col">
+                  <span className="sc-col-title">グループとリンク</span>
+                  {!groups.length ? (
+                    <p className="sc-none">このページのグループはありません</p>
+                  ) : (
+                    <ol className="sc-groups">
+                      {groups.map((m) => (
+                        <li
+                          key={m.id}
+                          className={`sc-group${m.id === presenter.active ? " is-active" : ""}`}
+                          style={{ "--g": GROUP_COLORS[m.color % GROUP_COLORS.length] } as CSSProperties}
+                        >
+                          <button className="sc-group-head" onClick={() => presenter.focus(m.id)} title="発表の窓でこのグループを選び、論文の該当箇所を見せる">
+                            <span className="mu-dot" aria-hidden="true" />
+                            <span className="sc-name">{markupName(m)}</span>
+                            <span className="sc-meta">リンク {m.links.length}</span>
+                          </button>
+                          {m.memo.trim() ? <p className="sc-memo">{m.memo.trim()}</p> : <p className="sc-none">メモはありません</p>}
+                          {m.links.length > 0 && (
+                            <ul className="sc-links">
+                              {[...m.links]
+                                .sort((a, b) => a.page - b.page || (a.rects[0]?.y ?? 0) - (b.rects[0]?.y ?? 0))
+                                .map((l) => (
+                                  <li key={l.id}>
+                                    <button className="sc-link" onClick={() => presenter.focus(m.id, l.id)} title="発表の窓で論文のこの箇所を見せる">
+                                      <span className="sc-kind">{LINK_KIND_LABEL[l.kind]}</span>
+                                      <span className="mp-page">p.{l.page}</span>
+                                      <span className="sc-text">{l.text || `（${LINK_KIND_LABEL[l.kind]}の範囲）`}</span>
+                                    </button>
+                                  </li>
+                                ))}
+                            </ul>
+                          )}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+              </div>
             </section>
           );
         })}

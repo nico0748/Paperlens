@@ -15,7 +15,7 @@
 // - 補足情報の対訳で文を選ぶと、論文の面でその文に枠を付けて、そこまで動かす（論文の画面の PdfView と同じ）。
 // - 補足情報（info）を渡されたときは、論文の右に三面目（対訳・訳・用語など）を置き、二面ずつ横にめくって見せる
 //   （[スライド | 論文] か [論文 | 補足情報]。論文はいつも見える。usePager.ts）。渡されないときはこれまでの二分割のまま。
-// - 「発表」（P）は、スライドと論文を別の窓に全画面で映し、この窓には台本（ScriptView）を出す（usePresenter.ts）。
+// - 「発表」（P）は、スライド・論文・補足情報を別の窓に全画面で映し、この窓には台本（ScriptView）を出す（usePresenter.ts）。
 //   別の窓を開けないときは、これまでどおりこの画面を全画面にする。発表の窓では presentation を渡す。
 
 import { Frame, Maximize, Minimize, MousePointer2, Presentation, X, Spline, SquareDashed, Trash2, Upload } from "lucide-react";
@@ -36,6 +36,7 @@ import {
   nextIndex,
   normalizeRect,
   overlapRatio,
+  withScript,
 } from "../../lib/slides.ts";
 import { setSentenceFocus, useSentenceFocus } from "../../lib/sentenceFocus.ts";
 import { type SentenceMark, hitTest, marksByPage, sentenceAnchor } from "../../lib/sentencesView.ts";
@@ -213,7 +214,7 @@ export function SlidesView(props: Props) {
       ) : !props.paperPdf ? (
         <div className="drop-hint" aria-busy="true"><h2>論文を読み込んでいます</h2></div>
       ) : presenter.open ? (
-        <ScriptView deck={s.deck} presenter={presenter} />
+        <ScriptView deck={s.deck} presenter={presenter} onScript={(page, text) => slides.update((d) => ({ ...d, scripts: withScript(d.scripts, page, text) }))} />
       ) : (
         <Split
           {...props}
@@ -927,7 +928,7 @@ function Split({
             <X size={14} aria-hidden="true" /> 発表を終える
           </button>
         ) : canOpenPresenter && !fullscreen ? (
-          <button className="btn text sm sv-fs-btn" title="スライドと論文を別の窓に全画面で映し、この窓に台本（グループのメモとリンク）を出す（P）" onClick={onFullscreen}>
+          <button className="btn text sm sv-fs-btn" title="スライド・論文・補足情報を別の窓に全画面で映し、この窓に台本とグループのリンクを並べて出す（P）" onClick={onFullscreen}>
             <Presentation size={14} aria-hidden="true" /> 発表
           </button>
         ) : (

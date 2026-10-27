@@ -16,6 +16,7 @@ import type { Rect } from "../src/lib/model.ts";
 import { type SlideDeck, markupName, overlapRatio, putSlides, slidesPdfPath, sortMarkups } from "../src/lib/slides.ts";
 import type { NodeVault } from "./nodeVault.ts";
 import { pdfjs } from "./pdfjs.ts";
+import { pptxNotes } from "./pptxNotes.ts";
 import { readPages } from "./pdftext.ts";
 import { requirePaper } from "./service.ts";
 
@@ -158,7 +159,8 @@ export async function importSlides(vault: NodeVault, id: string, fileName: strin
   if (isPptx(fileName, data)) {
     const pdf = await convert(data);
     await checkPdf(pdf);
-    return putSlides(vault, id, fileName, pdf, data);
+    // 発表者ノートは、台本がまだ無いスライドに入れる
+    return putSlides(vault, id, fileName, pdf, data, pptxNotes(data));
   }
   await checkPdf(data);
   return putSlides(vault, id, fileName, data);

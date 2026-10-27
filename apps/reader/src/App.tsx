@@ -18,6 +18,7 @@ import { SentenceStatus } from "./components/shell/SentenceStatus.tsx";
 import { SettingsModal } from "./components/shell/SettingsModal.tsx";
 import { MarkupPanel } from "./components/slides/MarkupPanel.tsx";
 import { type SlideFocus, SlidesView } from "./components/slides/SlidesView.tsx";
+import { usePresentWindow } from "./components/slides/usePresentWindow.ts";
 import { useSlides } from "./components/slides/useSlides.ts";
 import { StatusBar } from "./components/shell/StatusBar.tsx";
 import { ThemeToggle } from "./components/shell/ThemeToggle.tsx";
@@ -53,10 +54,15 @@ type View = "paper" | "graph" | "slides";
 /** 中央の上に重ねて開く画面 */
 type Overlay = "settings" | "help" | "lists" | "keys" | null;
 
-function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => void }) {
+/**
+ * present を渡すと発表の窓（PresenterApp）として動く。その論文のスライドの画面だけを全画面の見た目で出し、
+ * 論文の右に補足情報の面を置く。リボン・サイドバー・ステータスバーは出さず、画面の配置（workspace）も書き換えない
+ * （元の窓の配置を変えないため）。
+ */
+export function Workspace({ backend, onClose, present }: { backend: Backend; onClose?: () => void; present?: string }) {
   const [papers, setPapers] = useState<PaperSummary[]>([]);
-  const [current, setCurrent] = useState<string | null>(null);
-  const [view, setView] = useState<View>("paper");
+  const [current, setCurrent] = useState<string | null>(present ?? null);
+  const [view, setView] = useState<View>(present ? "slides" : "paper");
   const [pdf, setPdf] = useState<ArrayBuffer | null>(null);
   const [ann, setAnn] = useState<Annotations>(emptyAnnotations());
   const [note, setNote] = useState("");
@@ -105,7 +111,9 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const [tourRun, setTourRun] = useState(0);
   const unreadChanges = useUnreadChanges();
   const [resizing, setResizing] = useState(false);
-  const { ws, patch, ready } = useWorkspace(backend);
+  const { ws, patch: patchWs, ready } = useWorkspace(backend);
+  // 発表の窓では配置を保存しない（元の窓と同じ保存先なので、元の窓の配置を書き換えてしまう）
+  const patch: typeof patchWs = present ? () => undefined : patchWs;
   const setRightOpen = (v: boolean) => patch({ rightOpen: v });
   /** 開いた論文の前回の位置（2 ページ目以降のときだけ） */
   const [initialPos, setInitialPos] = useState<Pos | null>(null);
@@ -147,6 +155,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
     setMarkupHover(null);
     setSlideCount(undefined);
   }, [current]);
+  // 発表の窓: 台本（元の窓）とスライドのページ・選んだグループをやりとりする
+  const presentWin = usePresentWindow(present ?? null, { active: markupActive, setActive: setMarkupActive, setFocus: setSlideFocus });
 
   // 動作確認用。URL に #debug を付けたときだけ保管庫を参照できるようにする
   useEffect(() => {
@@ -174,6 +184,16 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   const restored = useRef(false);
   useEffect(() => {
     if (!ready) return;
+    if (present) {
+      restored.current = true;
+      void refresh()
+        .then((list) => {
+          const t = list.find((p) => p.id === present)?.title;
+          document.title = t ? `発表: ${t}` : "PaperLens 発表";
+        })
+        .catch(() => undefined);
+      return;
+    }
     void refresh().then((list) => {
       if (restored.current) return;
       restored.current = true;
@@ -187,7 +207,7 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
 
   // 開いている論文を覚えておく
   useEffect(() => {
-    if (current && restored.current && current !== ws.openPaper) patch({ openPaper: current });
+    if (!present && current && restored.current && current !== ws.openPaper) patch({ openPaper: current });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current]);
 
@@ -594,6 +614,8 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
   // キーボード操作。Cmd/Ctrl+\ で左サイドバー、Cmd/Ctrl+Shift+L でリスト、Esc で重ねた画面を閉じる
   const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
   keyRef.current = (e: KeyboardEvent) => {
+    // 発表の窓には、サイドバーも重ねる画面も無い
+    if (present) return;
     const mod = e.metaKey || e.ctrlKey;
     if (mod && !e.shiftKey && !e.altKey && (e.key === "\\" || e.code === "Backslash")) {
       e.preventDefault();
@@ -702,6 +724,39 @@ function Workspace({ backend, onClose }: { backend: Backend; onClose?: () => voi
       sentences={backend.kind === "server"}
     />
   ) : null;
+
+  // 発表の窓にはステータスバーが無いので、保存できなかったことは知らせで出す
+  useEffect(() => {
+    if (present && save.kind === "error") notify(`保存できませんでした: ${save.msg}`);
+  }, [present, save, notify]);
+
+  if (present) {
+    return (
+      <div className="app presenter-app">
+        {current && (
+          <SlidesView
+            slides={slides}
+            paperId={current}
+            paperPdf={pdf}
+            active={markupActive}
+            setActive={setMarkupActive}
+            hover={markupHover}
+            setHover={setMarkupHover}
+            focus={slideFocus}
+            notify={notify}
+            isolate={isolateLines}
+            setIsolate={setIsolateLines}
+            info={rightPanel}
+            paperJump={paperJump}
+            presentation
+            onSlidePage={presentWin.onSlidePage}
+            slideGoto={presentWin.slideGoto}
+          />
+        )}
+        <Snackbar snack={snack} onClose={() => setSnack(null)} />
+      </div>
+    );
+  }
 
   const tabTitle = view === "graph" ? "グラフ" : view === "slides" ? `スライドと論文: ${title || current || ""}` : title || (current ? "読み込んでいます" : "新しいタブ");
   const highlightCount = ann.highlights.length;
