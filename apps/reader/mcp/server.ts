@@ -8,6 +8,8 @@ import { dataRoot } from "../server/config.ts";
 import { NodeVault } from "../server/nodeVault.ts";
 import { VERSION } from "../server/version.ts";
 import { TRANSLATION_STYLE, TRANSLATION_WORKFLOW } from "./sentenceTools.ts";
+import type { Scope } from "../server/tokens.ts";
+import { scopeOf } from "./scopes.ts";
 import { READ_TOOLS, WRITE_TOOLS, type Tool } from "./tools.ts";
 
 const INSTRUCTIONS = `PaperLens は、論文を読みながら訳・用語・数式・読解メモを Markdown のノートに残すアプリです。
@@ -26,22 +28,49 @@ const INSTRUCTIONS = `PaperLens は、論文を読みながら訳・用語・数
 - 発表スライドは import_slides（PDF か PPTX の絶対パス）で論文に取り込みます。スライドを四角で囲んだ部分をグループと呼び、名前は Markup-03.02（3 ページ目の 2 個目）です。get_slide_markups で一覧と四角の中の文字を、read_slide_text でスライドの文字を読めます。囲むのは add_slide_markup（rect か、スライドの文字列 text で）で、各グループが論文のどの文章・図・数式に当たるかを link_slide_markup でつなぐと、画面ではスライドと論文が線で結ばれます。直すのは update_slide_markup・update_slide_link・unlink_slide_markup、消すのは delete_slide_markup（戻り値の removed を restore_slide_markup に渡すと戻せます）です。
 - アプリを開いている場合、ここでの変更は画面にすぐ反映されます。`;
 
-export function createServer(opts: { readOnly?: boolean } = {}) {
+export interface ServerOptions {
+  /** 旧来の読み取り専用（PAPERLENS_MCP_READONLY=1）。scopes を渡したときは使わない */
+  readOnly?: boolean;
+  /** トークンのスコープ。渡すと、入るツールだけを見せ、呼ばれたときにももう一度確かめる */
+  scopes?: readonly Scope[];
+  /** ツールが呼ばれるたびに知らせる（監査ログ用）。引数の本文は渡さない */
+  onCall?: (e: { tool: string; paper?: string; ok: boolean }) => void;
+}
+
+/** 呼び出しの記録に残す論文 ID。引数の paper だけを見る */
+const paperOf = (args: Record<string, unknown>) => (typeof args?.paper === "string" ? args.paper.slice(0, 120) : undefined);
+
+export function createServer(opts: ServerOptions = {}) {
   const server = new McpServer({ name: "paperlens", version: VERSION }, { instructions: INSTRUCTIONS });
+  const scopes = opts.scopes ? new Set<Scope>(opts.scopes) : null;
+  const allowedTool = (t: Tool) => {
+    const need = scopeOf(t.name, t.config.annotations.readOnlyHint);
+    if (!need) return false; // 書き込みなのにスコープの表に無いツールは、どのトークンにも見せない
+    if (scopes) return scopes.has(need);
+    return need === "read" || !opts.readOnly;
+  };
 
   const register = (t: Tool) =>
     server.registerTool(t.name, t.config, async (args: Record<string, unknown>) => {
+      // 一覧に出していないツールは登録もしていないが、念のため呼ばれた時点でも確かめる
+      if (!allowedTool(t)) {
+        opts.onCall?.({ tool: t.name, paper: paperOf(args), ok: false });
+        return { content: [{ type: "text" as const, text: `このトークンには「${t.name}」を使う権限がありません。` }], isError: true };
+      }
       try {
-        return await t.handler(args);
+        const out = await t.handler(args);
+        opts.onCall?.({ tool: t.name, paper: paperOf(args), ok: true });
+        return out;
       } catch (e) {
+        opts.onCall?.({ tool: t.name, paper: paperOf(args), ok: false });
         return { content: [{ type: "text" as const, text: e instanceof Error ? e.message : String(e) }], isError: true };
       }
     });
-  for (const t of READ_TOOLS) register(t);
-  if (!opts.readOnly) for (const t of WRITE_TOOLS) register(t);
+  for (const t of [...READ_TOOLS, ...WRITE_TOOLS]) if (allowedTool(t)) register(t);
+  const canRead = !scopes || scopes.has("read");
 
   // 読解ノートを資料として読めるようにする
-  server.registerResource(
+  if (canRead) server.registerResource(
     "note",
     new ResourceTemplate("paperlens://papers/{paper}/note.md", {
       list: async () => {

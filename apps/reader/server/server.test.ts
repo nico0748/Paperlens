@@ -24,7 +24,7 @@ after(async () => {
 });
 
 const api = async (p: string, init: RequestInit = {}) => {
-  const res = await fetch(`${s.url}${p}`, init);
+  const res = await fetch(`${s.url}${p}`, { ...init, headers: { "x-paperlens-session": s.sessionSecret, ...(init.headers as Record<string, string>) } });
   const body = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
   return { status: res.status, body };
 };

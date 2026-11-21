@@ -23,7 +23,7 @@ after(async () => {
 });
 
 const api = async (p: string, method = "GET", body?: unknown) => {
-  const res = await fetch(`${s.url}${p}`, { method, body: body === undefined ? undefined : JSON.stringify(body), headers: { "x-paperlens-client": "test-client" } });
+  const res = await fetch(`${s.url}${p}`, { method, body: body === undefined ? undefined : JSON.stringify(body), headers: { "x-paperlens-client": "test-client", "x-paperlens-session": s.sessionSecret } });
   return { status: res.status, body: await res.json() };
 };
 
@@ -31,7 +31,7 @@ test("取り込むと自動で文に分かれ、通知が届き、API で注釈�
   // 通知を聞く
   const ctrl = new AbortController();
   const events: { kind: string; paper?: string }[] = [];
-  const res = await fetch(`${s.url}/api/events`, { signal: ctrl.signal });
+  const res = await fetch(`${s.url}/api/events`, { signal: ctrl.signal, headers: { "x-paperlens-session": s.sessionSecret } });
   void (async () => {
     const dec = new TextDecoder();
     try {
@@ -46,7 +46,7 @@ test("取り込むと自動で文に分かれ、通知が届き、API で注釈�
     }
   })();
 
-  const imp = await fetch(`${s.url}/api/papers?name=sample.pdf`, { method: "POST", body: sample });
+  const imp = await fetch(`${s.url}/api/papers?name=sample.pdf`, { method: "POST", body: sample, headers: { "x-paperlens-session": s.sessionSecret } });
   const { id } = (await imp.json()) as { id: string };
   let st = (await api(`/api/papers/${id}/sentences`)).body;
   for (let i = 0; i < 100 && st.status === "parsing"; i++) {

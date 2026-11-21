@@ -23,7 +23,12 @@ const data = mkdtempSync(path.join(tmpdir(), "paperlens-e2e-slides-"));
 const shotDir = process.argv[2] ?? tmpdir();
 const port = "5298";
 const base = `http://127.0.0.1:${port}`;
-const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: port, PAPERLENS_CONFIG: path.join(data, "config.json") };
+const SECRET = "e2e-session-secret-0123456789abcdef";
+const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: port, PAPERLENS_CONFIG: path.join(data, "config.json"), PAPERLENS_SESSION_SECRET: SECRET };
+const auth = { "x-paperlens-session": SECRET };
+// このスクリプトから直接 API を呼ぶときは、いつも合言葉を付ける（画面の中の fetch は Cookie で通る）
+const rawFetch = globalThis.fetch;
+globalThis.fetch = (url, init = {}) => rawFetch(url, String(url).startsWith(base) ? { ...init, headers: { ...auth, ...(init.headers ?? {}) } } : init);
 
 const server = spawn(process.execPath, [path.join(root, "dist-server/server.js")], { env, stdio: ["ignore", "pipe", "inherit"] });
 await new Promise((resolve, reject) => {
@@ -43,14 +48,14 @@ let browser;
 try {
   // 論文とスライドを取り込む
   const sample = readFileSync(path.join(root, "src/demo/sample.pdf"));
-  const id = (await (await fetch(`${base}/api/papers?name=sample.pdf`, { method: "POST", body: sample })).json()).id;
+  const id = (await (await fetch(`${base}/api/papers?name=sample.pdf`, { method: "POST", body: sample, headers: auth })).json()).id;
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   doc.addPage([960, 540]).drawText("Sparse Window Attention", { x: 80, y: 260, size: 44, font });
   const p2 = doc.addPage([960, 540]);
   p2.drawText("Proposed method", { x: 80, y: 440, size: 36, font });
   p2.drawText("- windowed sparse attention", { x: 100, y: 360, size: 26, font });
-  const r = await fetch(`${base}/api/papers/${id}/slides?name=talk.pdf`, { method: "POST", body: Buffer.from(await doc.save()) });
+  const r = await fetch(`${base}/api/papers/${id}/slides?name=talk.pdf`, { method: "POST", body: Buffer.from(await doc.save()), headers: auth });
   if (!r.ok) fail(`スライドを取り込めませんでした: ${await r.text()}`);
 
   // 手元の Playwright の版に合うブラウザが無いときは、PW_CHROMIUM で実行ファイルを指定する
@@ -61,7 +66,7 @@ try {
   const errors = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));
-  await page.goto(base);
+  await page.goto(`${base}/?login=${SECRET}`);
 
   await step("リボンから「発表スライドと論文の対応」を開くと、左右に並ぶ", async () => {
     await page.getByRole("navigation", { name: "主要メニュー" }).getByRole("button", { name: "発表スライドと論文の対応" }).click();

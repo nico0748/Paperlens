@@ -13,7 +13,7 @@ export default defineConfig({
     outDir: "dist-server",
     emptyOutDir: true,
     rollupOptions: {
-      input: { server: "server/main.ts", app: "server/app.ts", mcp: "mcp/main.ts" },
+      input: { server: "server/main.ts", app: "server/app.ts", mcp: "mcp/main.ts", headless: "server/headless.ts" },
       output: { format: "es", entryFileNames: "[name].js", chunkFileNames: "[name]-[hash].js" },
     },
   },

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { type Backend, type McpInfo, ServerBackend, serverApi } from "../../lib/backend.ts";
 import { ExternalLink } from "lucide-react";
+import { McpTokens, SCOPE_INFO } from "./McpTokens.tsx";
 import { SettingHeading, SettingItem, Toggle } from "./Setting.tsx";
 
 export function McpPage({ backend }: { backend: Backend }) {
@@ -38,52 +39,52 @@ function McpServer() {
   useEffect(() => {
     serverApi.mcp().then(setInfo, (e: unknown) => setError(e instanceof Error ? e.message : String(e)));
   }, []);
-  const tools = info?.tools.filter((t) => !readOnly || !t.write).length ?? 0;
 
   return (
     <div id="set-mcp">
       <p className="settings-text">
         MCP サーバーを登録すると、Claude Desktop や Claude Code などの AI エージェントが、この画面と同じ操作（論文の取り込み、本文の読み取り、マーカーと訳、用語、数式、記録欄の入力、読解の段階の変更）を行えます。
-        アプリを起動していなくても使えます。起動中は、エージェントの変更がこの画面にすぐ反映されます。
+        アプリを閉じていても使えます（裏で画面のないサーバーが動き、10 分使わなければ止まります）。起動中は、エージェントの変更がこの画面にすぐ反映されます。
       </p>
       {error && <p className="err-msg" role="alert">{error}</p>}
       {info && (
         <>
-          <SettingItem name="状態" desc={info.built ? "MCP サーバーはビルド済みです。下の設定で登録できます。" : "MCP サーバーはまだビルドしていないため、ソースをそのまま動かす設定にしています（Node.js 22.6 以上が必要です）。npm run build を実行すると、ビルドしたものを使う設定に変わります。"}>
+          <SettingItem name="状態" desc={info.built ? "MCP サーバーはビルド済みです。" : "MCP サーバーはまだビルドしていないため、ソースをそのまま動かす設定にしています（Node.js 22.6 以上が必要です）。npm run build を実行すると、ビルドしたものを使う設定に変わります。"}>
             <span className={`status-pill${info.built ? " is-ok" : " is-warn"}`}>{info.built ? "使えます" : "ソースのまま"}</span>
           </SettingItem>
-          <SettingItem name="読み取りだけを許可する" desc="ノートを書き換えるツールを公開しません。下のコマンドと設定に反映します。">
-            <Toggle label="読み取りだけを許可する" checked={readOnly} onChange={setReadOnly} />
-          </SettingItem>
 
-          <SettingHeading>Claude Code で使う</SettingHeading>
-          <p className="settings-text">端末で次のコマンドを実行します。</p>
-          <CopyBlock text={readOnly ? info.claudeCodeReadOnly : info.claudeCode} label="Claude Code のコマンド" />
+          <McpTokens info={info} />
 
-          <SettingHeading>Claude Desktop で使う</SettingHeading>
-          <p className="settings-text">
-            設定ファイル <code className="path">{info.desktopConfigPath}</code> に次の内容を加え、Claude Desktop を再起動します。
-            ほかの MCP サーバーを登録している場合は、<code>mcpServers</code> の中に <code>paperlens</code> の項目だけを足してください。
-          </p>
-          <CopyBlock text={readOnly ? info.desktopConfigReadOnly : info.desktopConfig} label="Claude Desktop の設定" />
-
-          <SettingHeading>使えるツール（{tools} 個）</SettingHeading>
+          <SettingHeading>ツールとスコープ（{info.tools.length} 個）</SettingHeading>
           <ul className="tool-list">
             {info.tools.map((t) => (
-              <li key={t.name} className={readOnly && t.write ? "off" : undefined}>
+              <li key={t.name}>
                 <code>{t.name}</code>
                 <span>{t.title}</span>
-                <span className={`tag ${t.write ? "tag-write" : ""}`}>{t.write ? "書き込み" : "読み取り"}</span>
+                <span className={`tag ${t.write ? "tag-write" : ""}`}>{t.scope ? SCOPE_INFO[t.scope].label : "—"}</span>
               </li>
             ))}
           </ul>
+
+          <details className="legacy-mcp">
+            <summary>旧方式（トークン無し）の登録</summary>
+            <p className="notice warn">
+              トークン無しの登録は、AI エージェントが保存先のファイルを直接読み書きします。取り消し・スコープ・記録が効かないため、移行のあいだだけ残しています。上でトークンを発行し、登録し直してください。
+            </p>
+            <SettingItem name="読み取りだけを許可する" desc="ノートを書き換えるツールを公開しません。">
+              <Toggle label="読み取りだけを許可する" checked={readOnly} onChange={setReadOnly} />
+            </SettingItem>
+            <CopyBlock text={readOnly ? info.claudeCodeReadOnly : info.claudeCode} label="Claude Code のコマンド（旧方式）" />
+            <CopyBlock text={readOnly ? info.desktopConfigReadOnly : info.desktopConfig} label="Claude Desktop の設定（旧方式）" />
+          </details>
         </>
       )}
     </div>
   );
 }
 
-export function CopyBlock({ text, label }: { text: string; label: string }) {
+/** copyText を渡すと、画面には text（伏せたもの）を出し、コピーするときだけ copyText を入れる */
+export function CopyBlock({ text, label, copyText }: { text: string; label: string; copyText?: string }) {
   const [done, setDone] = useState(false);
   return (
     <div className="copy-block">
@@ -91,7 +92,7 @@ export function CopyBlock({ text, label }: { text: string; label: string }) {
       <button
         className="btn sm"
         onClick={() => {
-          void navigator.clipboard?.writeText(text).then(() => {
+          void navigator.clipboard?.writeText(copyText ?? text).then(() => {
             setDone(true);
             window.setTimeout(() => setDone(false), 1600);
           });

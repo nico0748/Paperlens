@@ -217,3 +217,38 @@
   .stack.end { align-items: flex-start; text-align: left; }
   .key-input { width: 100%; flex: 1; }
 }
+
+/* MCP 接続のアクセストークン */
+.status-pill.is-error { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
+.token-section { margin-top: 8px; }
+.token-list { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.token-row { border: 1px solid var(--background-modifier-border); border-radius: 10px; padding: 10px 12px; background: var(--md-sys-color-surface-container-low); }
+.token-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.token-name { font-weight: 600; color: var(--text-normal); }
+.token-prefix { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.token-head .status-pill { margin-left: auto; }
+.token-scopes { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
+.tag.tag-risky { background: var(--md-sys-color-error-container); color: var(--md-sys-color-on-error-container); }
+.token-meta { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.token-meta dt { color: var(--text-faint); }
+.token-meta dd { margin: 0; }
+.token-actions { gap: 6px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.token-actions .select.sm { min-width: 0; width: auto; min-height: 26px; font-size: var(--font-ui-smaller); }
+.btn.danger-text { color: var(--md-sys-color-error); }
+.token-form { border: 1px solid var(--background-modifier-border); border-radius: 10px; padding: 4px 12px 12px; margin: 8px 0; }
+.token-presets { gap: 6px; flex-wrap: wrap; }
+.scope-list { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.scope-list label { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: baseline; cursor: pointer; }
+.scope-list input { accent-color: var(--interactive-accent); }
+.scope-name { color: var(--text-normal); font-size: var(--font-ui-small); display: flex; align-items: center; gap: 6px; }
+.scope-name code { font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scope-desc { grid-column: 2; font-size: var(--font-ui-smaller); color: var(--text-muted); }
+.scope-list.compact { flex-direction: row; flex-wrap: wrap; gap: 4px 14px; }
+.token-issued { border: 1px solid var(--md-sys-color-outline-variant); border-radius: 10px; padding: 4px 12px 12px; margin: 8px 0; background: var(--md-sys-color-surface-container); }
+.token-audit, .legacy-mcp { margin-top: 16px; }
+.token-audit summary, .legacy-mcp summary { cursor: pointer; font-size: var(--font-ui-small); color: var(--text-muted); }
+.audit-table { width: 100%; border-collapse: collapse; font-size: var(--font-ui-smaller); margin-top: 6px; }
+.audit-table th, .audit-table td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--background-modifier-border); vertical-align: top; }
+.audit-table th { color: var(--text-faint); font-weight: 500; }
+.audit-table tr.is-fail td { color: var(--md-sys-color-error); }
+.legacy-mcp .copy-block { margin-top: 8px; }

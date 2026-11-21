@@ -9,7 +9,7 @@
 - データはすべて保存先フォルダの普通のファイルです。データベースは使いません。
 - MCP サーバーを登録すると、Claude Desktop や Claude Code などの AI エージェントが、画面と同じ操作（取り込み、本文の読み取り、全文の対訳、マーカーと訳、用語、数式、記録欄の入力、読解の段階の変更）を行えます。
 
-構成は [SecOwl](https://github.com/nico0748/secowl) と同じです。ローカルサーバー（127.0.0.1 だけで待ち受け）が保存先フォルダを読み書きし、画面はブラウザかデスクトップ版（Electron）で表示します。MCP サーバーは同じ処理を直接呼ぶため、アプリを起動していなくても使えます。
+構成は [SecOwl](https://github.com/nico0748/secowl) と同じです。ローカルサーバー（127.0.0.1 だけで待ち受け）が保存先フォルダを読み書きし、画面はブラウザかデスクトップ版（Electron）で表示します。MCP サーバーは設定画面で発行したアクセストークンでローカルサーバーに接続し、データの読み書きはすべてローカルサーバーを通します。アプリを起動していないときは、MCP サーバーが画面のないサーバーを裏で起動します。
 
 ## 必要なもの
 
@@ -63,7 +63,7 @@ npm run build
 npm start
 ```
 
-表示された URL（初期設定では http://127.0.0.1:5175 ）をブラウザで開きます。止めるときは `Ctrl + C` を押します。
+表示された URL（初期設定では http://127.0.0.1:5175/?login=… ）をブラウザで開きます。`?login=` の後ろは起動ごとに変わる合言葉で、これが無いと画面の API は使えません（同じ端末の別のプログラムから勝手に読み書きされないように）。人に見せないでください。止めるときは `Ctrl + C` を押します。
 ポートは環境変数 `PAPERLENS_PORT` で変えられます。
 
 #### 開発サーバーで動かす（コードを変更しながら使う場合）
@@ -72,7 +72,7 @@ npm start
 npm run dev
 ```
 
-http://localhost:5173 を開きます。画面のコードを保存すると自動で反映され、サーバーのコードを保存するとサーバーが再起動します。
+表示された http://localhost:5173/?login=… を開きます。画面のコードを保存すると自動で反映され、サーバーのコードを保存するとサーバーが再起動します。
 
 #### 1つの HTML ファイルにまとめる（サーバーを立てずに試す場合）
 
@@ -131,12 +131,18 @@ Obsidian で保存先フォルダを開いてノートを書き換えても、Pa
 
 ## AI エージェントから使う（MCP）
 
-左端の「設定」の「AI エージェント（MCP）」に、この端末での登録方法が表示されます。「コピーする」を押して貼り付けてください。
+左端の「設定」の「AI エージェント（MCP）」で **アクセストークンを発行** します。発行すると、この端末用の登録コマンド（Claude Code）と設定（Claude Desktop）がトークン入りで表示されるので、「コピーする」を押して貼り付けてください。トークンは発行した直後の一度だけ表示されます。
+
+- **スコープ**: トークンごとに使える操作を選びます（最小権限）。`read`（読み取り）・`notes:write`（ノート）・`sentences:write`（対訳）・`slides:write`（スライド）・`import`（取り込み・保存先の変更）・`delete`（削除）の 6 つです。スコープに入らないツールは、AI エージェントからは見えません。
+- **有効期限**: 7 / 30 / 90 / 365 日（既定 90 日）。無期限は選べません。期限の 7 日前から設定画面で再発行を促します。
+- **取り消し・再発行**: 設定画面からいつでも。次の呼び出しから効きます。漏れたおそれがあるときは「すべて取り消す」を使います。
+- **記録**: どのトークンが、いつ、どのツールを、どの論文に使ったかを 90 日分残します（訳文やメモの中身は残しません）。
+- **渡し方**: 環境変数 `PAPERLENS_TOKEN`（既定）、macOS のキーチェーン（`PAPERLENS_TOKEN_REF=keychain:paperlens/<識別子>`）、権限 0600 のトークンファイル（`PAPERLENS_TOKEN_FILE`）から選べます。キーチェーンとファイルでは、Claude の設定ファイルにトークンそのものは書かれません。
 
 ### Claude Code
 
 ```bash
-claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json -- node <apps/reader>/dist-server/mcp.js
+claude mcp add paperlens -e PAPERLENS_CONFIG=<設定ファイル> -e PAPERLENS_TOKEN=plk_… -- node <apps/reader>/dist-server/mcp.js
 ```
 
 ### Claude Desktop
@@ -149,14 +155,24 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
     "paperlens": {
       "command": "node",
       "args": ["<apps/reader>/dist-server/mcp.js"],
-      "env": { "PAPERLENS_CONFIG": "<apps/reader>/paperlens.config.json" }
+      "env": { "PAPERLENS_CONFIG": "<設定ファイル>", "PAPERLENS_TOKEN": "plk_…" }
     }
   }
 }
 ```
 
-`<apps/reader>` は実際のパスに置き換えてください。設定画面に表示されるものは置き換え済みです。
-`dist-server/mcp.js` は `npm run build` で作られます。ビルド前は `node --experimental-strip-types mcp/main.ts` でも動きます。
+設定画面に表示されるものは、パスとトークンが入った状態です。`dist-server/mcp.js` は `npm run build` で作られます。
+
+### しくみ
+
+- MCP サーバー（`mcp/main.ts`）はファイルに触らない中継役です。Claude からの要求を、ローカルサーバーの `/mcp` へ `Authorization: Bearer` 付きで送ります。トークンの照合・スコープ・記録はローカルサーバーが行います。
+- ローカルサーバーの居場所は、設定ファイルと同じフォルダの `paperlens.runtime.json`（0600）で知ります。トークンを送る前に、そこにあるサーバー鍵を使ったチャレンジ応答で相手が本物の PaperLens かを確かめます（先にポートを取った偽物にトークンを渡さないため）。
+- アプリが開いていなければ、画面のないサーバー（`server/headless.ts`）を起動します。最後の呼び出しから 10 分で止まり、アプリを開くとアプリのサーバーに引き継ぎます。
+- トークンの台帳（`paperlens.tokens.json`、秘密の SHA-256 だけ）と記録（`paperlens.audit.log`）も設定ファイルと同じフォルダに置き、保存先フォルダ（Obsidian の保管庫として同期されうる）には置きません。
+
+### 旧方式（トークン無し）
+
+`PAPERLENS_TOKEN` などを付けずに登録すると、これまでどおり MCP サーバーが保存先のファイルを直接読み書きします。取り消し・スコープ・記録が効かないため、移行のあいだだけ残しています。設定画面の「旧方式（トークン無し）の登録」にコマンドがあります。
 
 ### できること
 
@@ -191,7 +207,7 @@ claude mcp add paperlens -e PAPERLENS_CONFIG=<apps/reader>/paperlens.config.json
 
 ほかに、段階を追って論文を読む `read_paper`、1 文ずつ全文を訳す `translate_paper`、読んだ論文をふり返る `review_notes` のプロンプトがあります。対訳のツールの詳しい設計は [../../docs/mcp.md](../../docs/mcp.md) にあります。読解ノートは `paperlens://papers/<論文ID>/note.md` の資料としても読めます。
 
-- 環境変数 `PAPERLENS_MCP_READONLY=1` を付けると、読み取りのツールだけを公開します。設定画面の「読み取りだけを許可する」で、その設定を作れます。
+- 読み取りだけにしたいときは、`read` だけのトークンを発行します（旧方式では環境変数 `PAPERLENS_MCP_READONLY=1`）。
 - アプリを起動している間は、エージェントの変更が画面にすぐ反映されます。画面とエージェントが同じ論文を同時に編集しても、互いの変更を消しません。
 
 ## 保存先

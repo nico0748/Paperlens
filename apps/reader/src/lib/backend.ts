@@ -195,7 +195,50 @@ export const serverApi = {
   pickFolder: (current: string) => call<{ path: string }>("/api/desktop/pick-folder", { method: "POST", body: json({ current }) }),
   reveal: (path: string) => call<{ ok: boolean }>("/api/desktop/reveal", { method: "POST", body: json({ path }) }),
   mcp: () => call<McpInfo>("/api/mcp"),
+  tokens: () => call<TokenList>("/api/tokens"),
+  issueToken: (body: { name: string; scopes: Scope[]; days: number; delivery: Delivery }) => call<IssuedToken>("/api/tokens", { method: "POST", body: json(body) }),
+  rotateToken: (id: string, delivery: Delivery) => call<IssuedToken>(`/api/tokens/${enc(id)}/rotate`, { method: "POST", body: json({ delivery }) }),
+  narrowToken: (id: string, scopes: Scope[]) => call<{ token: McpToken }>(`/api/tokens/${enc(id)}`, { method: "PATCH", body: json({ scopes }) }),
+  revokeToken: (id: string) => call<{ ok: boolean }>(`/api/tokens/${enc(id)}`, { method: "DELETE" }),
+  revokeAllTokens: () => call<{ revoked: number }>("/api/tokens", { method: "DELETE" }),
+  tokenAudit: (limit = 100) => call<{ entries: AuditEntry[] }>(`/api/tokens/audit?limit=${limit}`),
 };
+
+export type Scope = "read" | "notes:write" | "sentences:write" | "slides:write" | "import" | "delete";
+export type Delivery = "env" | "keychain" | "file";
+export interface McpToken {
+  id: string;
+  prefix: string;
+  name: string;
+  scopes: Scope[];
+  days: number;
+  createdAt: string;
+  expiresAt: string;
+  lastUsedAt?: string;
+  lastClient?: string;
+  expired: boolean;
+  expiresSoon: boolean;
+}
+export interface TokenList {
+  tokens: McpToken[];
+  scopes: Scope[];
+  expiryDays: number[];
+  defaultDays: number;
+}
+export interface IssuedToken {
+  token: string;
+  record: McpToken;
+  setup: { delivery: Delivery; desktopConfig: string; claudeCode: string; desktopConfigMasked: string; claudeCodeMasked: string };
+}
+export interface AuditEntry {
+  at: string;
+  token?: string;
+  event: string;
+  tool?: string;
+  paper?: string;
+  ok: boolean;
+  detail?: string;
+}
 
 export interface McpInfo {
   node: string;
@@ -207,7 +250,8 @@ export interface McpInfo {
   claudeCode: string;
   claudeCodeReadOnly: string;
   desktopConfigPath: string;
-  tools: { name: string; title: string; write: boolean }[];
+  deliveries: Delivery[];
+  tools: { name: string; title: string; write: boolean; scope: Scope | null }[];
 }
 
 export class ServerBackend implements Backend {
@@ -295,11 +339,33 @@ export class ServerBackend implements Backend {
   }
 }
 
-/** ローカルサーバーで動いていればその保存先を返す。単体の HTML として開いたときは null。 */
-export async function connectServer(): Promise<ServerBackend | null> {
+/**
+ * 起動時に表示された URL（?login=<合言葉>）から開いたときは、合言葉をサーバーに渡して Cookie にしてもらい、
+ * アドレス欄からは消す（履歴や画面共有に残さない）。
+ */
+async function loginFromUrl() {
+  const url = new URL(location.href);
+  const secret = url.searchParams.get("login");
+  if (!secret) return;
+  url.searchParams.delete("login");
+  history.replaceState(history.state, "", url.pathname + url.search + url.hash);
+  try {
+    await fetch("/api/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret }) });
+  } catch {
+    // 下の /api/meta で、認証されていないことが分かる
+  }
+}
+
+/**
+ * ローカルサーバーで動いていればその保存先を返す。単体の HTML として開いたときは null。
+ * サーバーはあるが合言葉が無いときは "locked"（起動時に表示された URL から開き直してもらう）。
+ */
+export async function connectServer(): Promise<ServerBackend | null | "locked"> {
   if (typeof location === "undefined" || !location.protocol.startsWith("http")) return null;
   try {
+    await loginFromUrl();
     const res = await fetch("/api/meta");
+    if (res.status === 401) return "locked";
     if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return null;
     return new ServerBackend((await res.json()) as Meta);
   } catch {

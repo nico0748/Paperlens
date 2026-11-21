@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { TRANSLATION_WORKFLOW } from "../mcp/sentenceTools.ts";
+import { scopeOf } from "../mcp/scopes.ts";
 import { SENTENCE_TOOL_NAMES, TOOLS } from "../mcp/tools.ts";
 import { APP_ROOT, configPath, readConfig } from "./config.ts";
 
@@ -20,9 +21,10 @@ function desktopConfigPath() {
   return path.join(home, ".config", "Claude", "claude_desktop_config.json");
 }
 
-const quote = (s: string) => (/^[\w./:@=-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
+const quote = (s: string) => (/^[\w./:@=•-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
 
-export function mcpInfo() {
+/** MCP の起動コマンドと、それに渡す環境変数（保存先の決め方）。トークンは含めない */
+export function mcpLaunch() {
   const node = resolveNode();
   const built = path.join(APP_ROOT, "dist-server", "mcp.js");
   const isBuilt = fs.existsSync(built);
@@ -33,46 +35,42 @@ export function mcpInfo() {
   const env: Record<string, string> = { PAPERLENS_CONFIG: configPath() };
   if (process.env.PAPERLENS_DATA) env.PAPERLENS_DATA = dataRoot;
   if (process.env.PAPERLENS_DEFAULT_DATA) env.PAPERLENS_DEFAULT_DATA = process.env.PAPERLENS_DEFAULT_DATA;
+  return { node, args, env, built: isBuilt, dataRoot };
+}
 
-  const desktop = (readOnly: boolean) =>
-    JSON.stringify(
-      {
-        mcpServers: {
-          paperlens: {
-            command: node,
-            args,
-            env: { ...env, ...(readOnly ? { PAPERLENS_MCP_READONLY: "1" } : {}) },
-          },
-        },
-      },
-      null,
-      2,
-    );
-  const code = (readOnly: boolean) =>
-    [
-      "claude mcp add paperlens",
-      ...Object.entries(env).map(([k, v]) => `-e ${k}=${quote(v)}`),
-      ...(readOnly ? ["-e PAPERLENS_MCP_READONLY=1"] : []),
-      "--",
-      quote(node),
-      ...args.map(quote),
-    ].join(" ");
+/** Claude Desktop の設定 JSON と Claude Code のコマンドを組み立てる */
+export function mcpSnippets(extraEnv: Record<string, string>) {
+  const { node, args, env } = mcpLaunch();
+  const all = { ...env, ...extraEnv };
+  const desktop = JSON.stringify({ mcpServers: { paperlens: { command: node, args, env: all } } }, null, 2);
+  const code = ["claude mcp add paperlens", ...Object.entries(all).map(([k, v]) => `-e ${k}=${quote(v)}`), "--", quote(node), ...args.map(quote)].join(" ");
+  return { desktopConfig: desktop, claudeCode: code };
+}
+
+export function mcpInfo() {
+  const { node, args, built: isBuilt, dataRoot } = mcpLaunch();
+  // 旧方式（トークン無し・ファイルを直接読み書き）。移行のあいだだけ残す
+  const legacy = mcpSnippets({});
+  const legacyRo = mcpSnippets({ PAPERLENS_MCP_READONLY: "1" });
 
   return {
     node,
     script: args[args.length - 1],
     dataRoot,
     built: isBuilt,
-    desktopConfig: desktop(false),
-    desktopConfigReadOnly: desktop(true),
-    claudeCode: code(false),
-    claudeCodeReadOnly: code(true),
+    desktopConfig: legacy.desktopConfig,
+    desktopConfigReadOnly: legacyRo.desktopConfig,
+    claudeCode: legacy.claudeCode,
+    claudeCodeReadOnly: legacyRo.claudeCode,
     desktopConfigPath: desktopConfigPath(),
+    /** トークン方式の渡し方のうち、この端末で選べるもの */
+    deliveries: process.platform === "darwin" ? ["env", "keychain", "file"] : ["env", "file"],
     // group: notes = 読解ノート・マーカー・用語・数式、sentences = 1 文ずつの対訳（sentences.json）
     tools: TOOLS.map((t) => ({
       name: t.name,
       title: t.config.title,
       write: !t.config.annotations.readOnlyHint,
+      scope: scopeOf(t.name, t.config.annotations.readOnlyHint),
       group: SENTENCE_TOOL_NAMES.has(t.name) ? ("sentences" as const) : ("notes" as const),
     })),
     /** 全文翻訳の手順（設定画面で「Claude に全文を訳させるには」として見せる）。 */
