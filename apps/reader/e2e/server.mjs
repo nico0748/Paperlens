@@ -5,6 +5,7 @@
 // 2. 同じ保存先に MCP サーバーをつなぎ、AI エージェントとしてマーカー・用語・記録を書き込む
 // 3. 画面を読み直さずに、エージェントの変更が映り、画面の変更も消えていないことを確かめる
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,7 +17,9 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const data = mkdtempSync(path.join(tmpdir(), "paperlens-e2e-"));
 const shotDir = process.argv[2] ?? tmpdir();
-const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297", PAPERLENS_ALLOW_PRIVATE_URLS: "1" };
+// 画面の合言葉は決めておき、?login= 付きの URL で開く。台帳と runtime.json も一時フォルダに置く
+const SECRET = "e2e-session-secret-0123456789abcdef";
+const env = { ...process.env, PAPERLENS_DATA: data, PAPERLENS_PORT: "5297", PAPERLENS_ALLOW_PRIVATE_URLS: "1", PAPERLENS_SESSION_SECRET: SECRET, PAPERLENS_CONFIG: path.join(data, ".conf", "config.json") };
 // URL からの取り込みは、このサーバー自身が返す PDF で確かめる（外へは通信しない）
 
 const server = spawn(process.execPath, [path.join(root, "dist-server/server.js")], { env, stdio: ["ignore", "pipe", "inherit"] });
@@ -58,7 +61,7 @@ process.on("exit", () => server.kill());
 
 // 画面の配置（サイドバーの開閉）はサーバーから読み込む。読み込み終わってから操作する
 const workspaceLoaded = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/workspace" && r.request().method() === "GET");
-await page.goto("http://127.0.0.1:5297/");
+await page.goto(`http://127.0.0.1:5297/?login=${SECRET}`);
 await workspaceLoaded;
 
 await step("サーバーの保存先で開く", async () => {
@@ -110,8 +113,24 @@ await step("画面でマーカーと記録を入れる", async () => {
   if (!md.includes("画面から書いた要約。")) throw new Error("記録が note.md に入っていない");
 });
 
+// MCP はトークン方式でつなぐ。中継役は動いているサーバー（runtime.json）を見つけ、/mcp を通して読み書きする
+const issue = async (scopes) =>
+  (await (await fetch("http://127.0.0.1:5297/api/tokens", { method: "POST", headers: { "x-paperlens-session": SECRET }, body: JSON.stringify({ name: "e2e-mcp", scopes }) })).json()).token;
+const fullToken = await issue(["read", "notes:write", "sentences:write", "slides:write", "import", "delete"]);
 const client = new Client({ name: "e2e", version: "1.0.0" });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "dist-server/mcp.js")], env, stderr: "ignore" }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "dist-server/mcp.js")], env: { ...env, PAPERLENS_TOKEN: fullToken }, stderr: "ignore" }));
+
+await step("MCP: 読み取りだけのトークンでは、書き込みのツールが見えず、トークンが違えばつながらない", async () => {
+  const ro = new Client({ name: "e2e-ro", version: "1.0.0" });
+  await ro.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "dist-server/mcp.js")], env: { ...env, PAPERLENS_TOKEN: await issue(["read"]) }, stderr: "ignore" }));
+  const names = (await ro.listTools()).tools.map((t) => t.name);
+  if (!names.includes("list_papers") || names.includes("add_highlight") || names.includes("clear_translations")) throw new Error(`スコープで絞られていない: ${names.join(",")}`);
+  await ro.close();
+  const bad = new Client({ name: "e2e-bad", version: "1.0.0" });
+  const wrong = `${fullToken.slice(0, 13)}${"A".repeat(43)}`;
+  const failed = await bad.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(root, "dist-server/mcp.js")], env: { ...env, PAPERLENS_TOKEN: wrong }, stderr: "ignore" })).then(() => false, () => true);
+  if (!failed) throw new Error("違うトークンでつながった");
+});
 const call = async (name, args = {}) => {
   const r = await client.callTool({ name, arguments: args });
   if (r.isError) throw new Error(`${name}: ${r.content[0].text}`);
@@ -183,11 +202,22 @@ await step("設定画面に MCP の登録方法が出る", async () => {
   await page.getByRole("dialog", { name: "設定" }).waitFor();
   await page.getByRole("navigation", { name: "設定の項目" }).getByRole("button", { name: "AI エージェント（MCP）" }).click();
   await page.getByRole("heading", { name: "AI エージェント（MCP）" }).waitFor();
-  const cmd = await page.getByLabel("Claude Code のコマンド").textContent();
-  if (!cmd.startsWith("claude mcp add paperlens") || !cmd.includes("dist-server/mcp.js")) throw new Error(`コマンドが違う: ${cmd}`);
+  // トークンを発行すると、伏せたコマンドが出る（平文はコピーしたときだけ）
+  await page.getByRole("button", { name: "トークンを発行する" }).click();
+  await page.getByLabel("名前").fill("e2e");
+  await page.getByRole("button", { name: "訳を付けてもらう" }).click();
+  await page.getByRole("button", { name: "発行する", exact: true }).click();
+  await page.getByText("このトークンはいまだけ表示されます。").waitFor();
+  const cmd = await page.getByLabel("Claude Code のコマンド", { exact: true }).textContent();
+  if (!cmd.startsWith("claude mcp add paperlens") || !cmd.includes("dist-server/mcp.js") || !cmd.includes("PAPERLENS_TOKEN=plk_")) throw new Error(`コマンドが違う: ${cmd}`);
+  if (!cmd.includes("••••")) throw new Error("トークンが伏せられていない");
   await page.locator("section", { has: page.getByRole("heading", { name: "AI エージェント（MCP）" }) }).screenshot({ path: `${shotDir}/12-settings-mcp.png` });
+  await page.locator(".token-issued").getByRole("button", { name: "閉じる", exact: true }).click();
+  await page.locator(".token-row", { has: page.locator(".token-name", { hasText: /^e2e$/ }) }).getByText("対訳の書き込み").waitFor();
+  // 旧方式の登録も、移行のあいだは出す
+  await page.getByText("旧方式（トークン無し）の登録").click();
   await page.getByLabel("読み取りだけを許可する").check();
-  if (!(await page.getByLabel("Claude Code のコマンド").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
+  if (!(await page.getByLabel("Claude Code のコマンド（旧方式）").textContent()).includes("PAPERLENS_MCP_READONLY=1")) throw new Error("読み取り専用の設定にならない");
 });
 
 await step("設定の「画面の配置」のリセットは workspace.json も戻し、閉じるときに古い配置を書き戻さない", async () => {
@@ -236,7 +266,15 @@ await step("読み直すと、前回の位置から表示する", async () => {
 });
 
 await step("URL から取り込む（新しい論文は書誌情報の欄を開き、同じ URL は既存を開く）", async () => {
-  const url = `http://127.0.0.1:5297/api/papers/${encodeURIComponent(id)}/pdf`;
+  // 取り込み元は別の小さなサーバー（画面の API は合言葉が要るので、サーバー自身の PDF は取り込み元に使えない）
+  const pdfBytes = readFileSync(path.join(data, "papers", id, "paper.pdf"));
+  const pdfServer = createServer((_q, r) => {
+    r.writeHead(200, { "content-type": "application/pdf" });
+    r.end(pdfBytes);
+  });
+  await new Promise((ok) => pdfServer.listen(5298, "127.0.0.1", ok));
+  process.on("exit", () => pdfServer.close());
+  const url = "http://127.0.0.1:5298/paper.pdf";
   const count = () => readdirSync(path.join(data, "papers")).length;
   const before = count();
   const add = async () => {

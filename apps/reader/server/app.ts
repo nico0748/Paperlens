@@ -2,8 +2,11 @@
 // 127.0.0.1 だけで待ち受け、画面（dist/）と API を配る。データは保存先フォルダの普通のファイルにだけ置く。
 // デスクトップ版（electron/main.js）も、この startServer を同じプロセスで呼ぶ。
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer as createMcpServer } from "../mcp/server.ts";
 import path from "node:path";
 import { type FmValue, FrontmatterError } from "../src/lib/frontmatter.ts";
 import type { AnnotationOp } from "../src/lib/model.ts";
@@ -49,6 +52,23 @@ import {
   upsertGlossary,
 } from "./sentences.ts";
 import { VERSION } from "./version.ts";
+import { type Runtime, type RuntimeMode, helloProof, newServerKey, readRuntime, removeRuntime, safeEqual, writeRuntime } from "./runtime.ts";
+import {
+  DEFAULT_EXPIRY_DAYS,
+  EXPIRY_DAYS,
+  SCOPES,
+  TokenError,
+  audit,
+  issueToken,
+  listTokens,
+  narrowToken,
+  readAudit,
+  revokeAll,
+  revokeToken,
+  rotateToken,
+  verifyBearer,
+} from "./tokens.ts";
+import { deliverToken, removeDeliveredToken } from "./tokenDelivery.ts";
 import { SlidesInputError, changeMarkups, loadDeck, slidesPdfPath } from "../src/lib/slides.ts";
 import { SlidesConvertError, converters, importSlides } from "./slides.ts";
 
@@ -453,6 +473,37 @@ route("PUT", "/api/workspace", async (r) => {
   return writeWorkspace(vaultFor(r.origin), body);
 });
 
+// --- MCP 接続のアクセストークン（画面からだけ操作できる。トークン自身では操作できない） ---
+
+route("GET", "/api/tokens", async () => ({ tokens: listTokens(), scopes: SCOPES, expiryDays: EXPIRY_DAYS, defaultDays: DEFAULT_EXPIRY_DAYS }));
+route("POST", "/api/tokens", async (r) => {
+  const body = await jsonBody<{ name?: unknown; scopes?: unknown; days?: unknown; delivery?: unknown }>(r);
+  const issued = issueToken(body);
+  return { ...issued, setup: await deliverToken(issued.token, issued.record.id, body.delivery) };
+});
+route("POST", "/api/tokens/:id/rotate", async (r) => {
+  const { delivery } = await jsonBody<{ delivery?: unknown }>(r);
+  const issued = rotateToken(r.params[0]);
+  await removeDeliveredToken(issued.previous);
+  return { ...issued, setup: await deliverToken(issued.token, issued.record.id, delivery) };
+});
+route("PATCH", "/api/tokens/:id", async (r) => {
+  const { scopes } = await jsonBody<{ scopes?: unknown }>(r);
+  return { token: narrowToken(r.params[0], scopes) };
+});
+route("DELETE", "/api/tokens/:id", async (r) => {
+  revokeToken(r.params[0]);
+  await removeDeliveredToken(r.params[0]);
+  return { ok: true };
+});
+route("DELETE", "/api/tokens", async () => {
+  const ids = listTokens().map((t) => t.id);
+  const n = revokeAll();
+  for (const id of ids) await removeDeliveredToken(id);
+  return { revoked: n };
+});
+route("GET", "/api/tokens/audit", async (r) => ({ entries: readAudit(Math.min(1000, Number(r.query.get("limit") || 200))) }));
+
 route("POST", "/api/desktop/pick-folder", async (r) => {
   if (!host) throw new HttpError(400, "フォルダの選択はデスクトップ版でだけ使えます。");
   const { current } = await jsonBody<{ current?: string }>(r);
@@ -516,14 +567,129 @@ function allowed(req: http.IncomingMessage) {
   }
 }
 
+// --- 認証 -------------------------------------------------------------------------
+// 画面（/api/*）: 起動ごとの合言葉（セッション秘密）。デスクトップ版は Electron が Cookie を直接入れ、
+//   ブラウザで開くときは、起動時に表示する URL（?login=…）から画面が POST /api/session で受け取る。
+// MCP（/mcp）: 設定画面で発行したアクセストークン（Authorization: Bearer）。スコープで使えるツールを絞る。
+// どちらも満たさないリクエストは、Origin が無くても通さない（同じ端末の別のプロセスからの直接の呼び出しも含む）。
+
+export const SESSION_COOKIE = "paperlens_session";
+let sessionSecret = "";
+let serverKey = "";
+let runtimeMode: RuntimeMode = "server";
+let lastRequest = Date.now();
+let onShutdown: (() => void) | null = null;
+
+function sendJson(res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) {
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extra });
+  res.end(JSON.stringify(body));
+}
+
+function cookieValue(req: http.IncomingMessage, name: string) {
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return "";
+}
+
+function hasSession(req: http.IncomingMessage) {
+  const given = String(req.headers["x-paperlens-session"] ?? "") || cookieValue(req, SESSION_COOKIE);
+  return !!given && safeEqual(given, sessionSecret);
+}
+
+const sessionCookie = () => `${SESSION_COOKIE}=${sessionSecret}; Path=/; HttpOnly; SameSite=Strict`;
+
+async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse, url: URL) {
+  // ブラウザからは呼ばせない（CORS も付けない）
+  if (req.headers.origin) return sendJson(res, 403, { error: "MCP の入口はブラウザからは使えません。" });
+  if (url.search && /(^|[?&])(token|access_token)=/i.test(url.search)) {
+    return sendJson(res, 400, { error: "トークンを URL に載せないでください。Authorization ヘッダーで送ります。" });
+  }
+
+  if (url.pathname === "/mcp/hello") {
+    // 中継役が「相手が本物の PaperLens か」を確かめる。鍵そのものは返さない
+    if (req.method !== "POST") return sendJson(res, 405, { error: "POST で呼んでください。" });
+    const { nonce } = JSON.parse((await readBody(req)).toString("utf8") || "{}") as { nonce?: unknown };
+    if (typeof nonce !== "string" || !/^[0-9a-f]{32,128}$/.test(nonce)) return sendJson(res, 400, { error: "nonce が正しくありません。" });
+    return sendJson(res, 200, { proof: helloProof(serverKey, nonce), mode: runtimeMode, version: VERSION });
+  }
+
+  if (url.pathname === "/mcp/shutdown") {
+    // アプリが起きたとき、裏で動いているヘッドレスを止める合図。サーバー鍵を知る者（runtime.json を読める者）だけが送れる
+    const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "");
+    if (req.method !== "POST" || !m || !safeEqual(m[1], serverKey)) return sendJson(res, 403, { error: "止められません。" });
+    if (runtimeMode !== "headless") return sendJson(res, 409, { error: "ヘッドレスのサーバーではありません。" });
+    sendJson(res, 200, { ok: true });
+    setImmediate(() => onShutdown?.());
+    return;
+  }
+
+  if (url.pathname !== "/mcp") return sendJson(res, 404, { error: "その入口はありません。" });
+
+  let token;
+  try {
+    token = verifyBearer(req.headers.authorization, String(req.headers["user-agent"] ?? "") || undefined);
+  } catch (e) {
+    const status = e instanceof TokenError ? e.status : 401;
+    return sendJson(res, status, { jsonrpc: "2.0", error: { code: -32001, message: e instanceof Error ? e.message : String(e) }, id: null }, status === 401 ? { "www-authenticate": "Bearer" } : {});
+  }
+  if (req.method !== "POST") return sendJson(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "POST だけを受け付けます。" }, id: null }, { allow: "POST" });
+
+  let body: unknown;
+  try {
+    body = JSON.parse((await readBody(req)).toString("utf8"));
+  } catch {
+    return sendJson(res, 400, { jsonrpc: "2.0", error: { code: -32700, message: "JSON として読めませんでした。" }, id: null });
+  }
+  // リクエストごとに作り直す（状態を持たない）。トークンのスコープに入るツールだけを登録する
+  const mcp = createMcpServer({
+    scopes: token.scopes,
+    onCall: (e) => audit({ token: token.id, event: "call", tool: e.tool, paper: e.paper, ok: e.ok }),
+  });
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on("close", () => {
+    void transport.close();
+    void mcp.close();
+  });
+  await mcp.connect(transport);
+  await transport.handleRequest(req, res, body);
+}
+
 async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  lastRequest = Date.now();
   if (!allowed(req)) {
     res.writeHead(403, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ error: "このサーバーは同じ端末の画面からだけ使えます。" }));
     return;
   }
+  if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
+    try {
+      return await handleMcp(req, res, url);
+    } catch (e) {
+      if (!res.headersSent) sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+  }
+  if (runtimeMode === "headless") return sendJson(res, 404, { error: "画面のないサーバーです。PaperLens のアプリを開いてください。" });
   if (!url.pathname.startsWith("/api/")) return serveStatic(res, url.pathname);
+
+  if (url.pathname === "/api/session") {
+    if (req.method === "GET") return sendJson(res, 200, { authenticated: hasSession(req) });
+    if (req.method !== "POST") return sendJson(res, 405, { error: "POST で呼んでください。" });
+    let secret: unknown;
+    try {
+      secret = (JSON.parse((await readBody(req)).toString("utf8") || "{}") as { secret?: unknown }).secret;
+    } catch {
+      secret = undefined;
+    }
+    if (typeof secret !== "string" || !safeEqual(secret, sessionSecret)) return sendJson(res, 401, { error: "合言葉が違います。起動したときに表示された URL から開き直してください。" });
+    return sendJson(res, 200, { ok: true }, { "set-cookie": sessionCookie() });
+  }
+  if (!hasSession(req)) {
+    return sendJson(res, 401, { error: "この画面は認証されていません。PaperLens を起動したときに表示された URL から開いてください。", code: "session" });
+  }
 
   if (url.pathname === "/api/events") {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -565,8 +731,37 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
   res.end(JSON.stringify({ error: "その API はありません。" }));
 }
 
-export async function startServer(opts: { port?: number; host?: string } = {}) {
+export interface StartOptions {
+  port?: number;
+  host?: string;
+  /** app = デスクトップ版、headless = MCP が裏で起こす画面なしのサーバー、server = npm start など */
+  mode?: RuntimeMode;
+  /** 画面の合言葉。決めておきたいとき（開発用の中継・e2e）だけ渡す。既定は起動ごとの乱数 */
+  sessionSecret?: string;
+  /** runtime.json を書くか（既定: 書く） */
+  publish?: boolean;
+  /** ヘッドレスのとき、この時間リクエストが無ければ止まる（ミリ秒） */
+  idleMs?: number;
+}
+
+/** 裏で動いているヘッドレスを止める（アプリが起きたとき、保存先の書き手を 1 つにするため） */
+async function stopHeadless(rt: Runtime | null) {
+  if (!rt || rt.mode !== "headless") return;
+  try {
+    await fetch(`http://127.0.0.1:${rt.port}/mcp/shutdown`, { method: "POST", headers: { authorization: `Bearer ${rt.key}` }, signal: AbortSignal.timeout(2000) });
+  } catch {
+    /* もう止まっている */
+  }
+}
+
+export async function startServer(opts: StartOptions = {}) {
   const port = opts.port ?? readConfig().port;
+  runtimeMode = opts.mode ?? "server";
+  sessionSecret = opts.sessionSecret || process.env.PAPERLENS_SESSION_SECRET || crypto.randomBytes(32).toString("base64url");
+  serverKey = newServerKey();
+  const publish = opts.publish ?? true;
+  if (publish && runtimeMode !== "headless") await stopHeadless(readRuntime());
+
   const server = http.createServer((req, res) => void handle(req, res));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -575,17 +770,41 @@ export async function startServer(opts: { port?: number; host?: string } = {}) {
   const addr = server.address() as { port: number };
   const root = dataRoot();
   await ensureLayout(new NodeVault(root));
-  watch(root);
+  if (runtimeMode !== "headless") watch(root);
+  const key = serverKey;
+  if (publish) writeRuntime({ pid: process.pid, port: addr.port, mode: runtimeMode, key, startedAt: new Date().toISOString() });
+
+  let idle: NodeJS.Timeout | null = null;
+  let closed = false;
+  const close = () =>
+    new Promise<void>((resolve) => {
+      if (closed) return resolve();
+      closed = true;
+      if (idle) clearInterval(idle);
+      if (publish) removeRuntime(key);
+      unwatch();
+      for (const c of clients) c.end();
+      clients.clear();
+      server.closeAllConnections?.();
+      server.close(() => resolve());
+    });
+  onShutdown = () => void close().then(() => runtimeMode === "headless" && process.exit(0));
+  if (runtimeMode === "headless") {
+    const idleMs = opts.idleMs ?? 10 * 60 * 1000;
+    lastRequest = Date.now();
+    idle = setInterval(() => {
+      if (Date.now() - lastRequest > idleMs) onShutdown?.();
+    }, Math.min(30_000, idleMs));
+    idle.unref?.();
+  }
   return {
     url: `http://127.0.0.1:${addr.port}`,
     port: addr.port,
     dataRoot: root,
-    close: () =>
-      new Promise<void>((resolve) => {
-        unwatch();
-        for (const c of clients) c.end();
-        clients.clear();
-        server.close(() => resolve());
-      }),
+    /** 画面の合言葉。ブラウザで開くときは loginUrl を使う */
+    sessionSecret,
+    loginUrl: `http://127.0.0.1:${addr.port}/?login=${sessionSecret}`,
+    sessionCookie: { name: SESSION_COOKIE, value: sessionSecret },
+    close,
   };
 }

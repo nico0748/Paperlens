@@ -31,7 +31,7 @@ let slides: Buffer;
 before(async () => {
   s = await startServer({ port: 0 });
   slides = await makeSlides();
-  const res = await fetch(`${s.url}/api/papers?name=sample.pdf`, { method: "POST", body: sample, headers: { "content-type": "application/pdf" } });
+  const res = await fetch(`${s.url}/api/papers?name=sample.pdf`, { method: "POST", body: sample, headers: { "content-type": "application/pdf", "x-paperlens-session": s.sessionSecret } });
   id = ((await res.json()) as { id: string }).id;
 });
 after(async () => {
@@ -40,7 +40,7 @@ after(async () => {
 });
 
 const api = async (p: string, init: RequestInit = {}) => {
-  const res = await fetch(`${s.url}${p}`, init);
+  const res = await fetch(`${s.url}${p}`, { ...init, headers: { "x-paperlens-session": s.sessionSecret, ...(init.headers as Record<string, string>) } });
   const body = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.arrayBuffer();
   return { status: res.status, body };
 };
@@ -137,7 +137,7 @@ test("スライドを差し替えても四角は残る。PPTX は変換して、
 
 test("ほかのプロセス（MCP）の書き込みは、画面へ slides として知らせる", async () => {
   const ctrl = new AbortController();
-  const res = await fetch(`${s.url}/api/events`, { signal: ctrl.signal });
+  const res = await fetch(`${s.url}/api/events`, { signal: ctrl.signal, headers: { "x-paperlens-session": s.sessionSecret } });
   const reader = res.body!.getReader();
   await reader.read(); // : connected
   await tool("set_slide_markup_memo", { paper: id, markup: "Markup-02.01", memo: "書き換え" });

@@ -3,7 +3,7 @@
  * ローカルサーバー（dist-server/app.js）を同じプロセスで立ち上げ、その URL をウィンドウに読み込む。
  * 画面のコードはブラウザで動かすときと同じもの。
  */
-import { app as electronApp, BrowserWindow, Menu, dialog, screen, shell } from "electron";
+import { app as electronApp, BrowserWindow, Menu, dialog, screen, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,8 @@ const WINDOW_ICON = path.join(__dirname, "icon.png");
 const STATE_FILE = path.join(userData, "window-state.json");
 let mainWindow = null;
 let serverUrl = "";
+/** 画面の合言葉。Cookie として直接入れるので、HTTP の上には一度も流れない */
+let sessionCookie = null;
 
 function readWindowState() {
   try {
@@ -136,7 +138,7 @@ function createWindow() {
 }
 
 async function currentDataRoot() {
-  const res = await fetch(`${serverUrl}/api/meta`);
+  const res = await fetch(`${serverUrl}/api/meta`, { headers: { "x-paperlens-session": sessionCookie?.value ?? "" } });
   return (await res.json()).dataRoot;
 }
 
@@ -238,8 +240,18 @@ if (!electronApp.requestSingleInstanceLock()) {
 
     try {
       // ポート 0 を渡すと、空いているポートを OS が選ぶ
-      const started = await startServer({ port: 0 });
+      const started = await startServer({ port: 0, mode: "app" });
       serverUrl = started.url;
+      sessionCookie = started.sessionCookie;
+      await session.defaultSession.cookies.set({
+        url: serverUrl,
+        name: sessionCookie.name,
+        value: sessionCookie.value,
+        httpOnly: true,
+        sameSite: "strict",
+      });
+      // 終了するときに runtime.json を片付ける（MCP の中継役が、止まったアプリを探しに行かないように）
+      electronApp.on("will-quit", () => void started.close());
       console.log(`PaperLens: ${serverUrl}  保存先: ${started.dataRoot}`);
     } catch (err) {
       dialog.showErrorBox("起動できませんでした", String(err?.message || err));

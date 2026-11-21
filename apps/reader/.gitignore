@@ -3,3 +3,7 @@ release/
 # 開発時の保存先と設定（個人のデータ）
 data/
 paperlens.config.json
+paperlens.tokens.json
+paperlens.audit.log
+paperlens.runtime.json
+tokens/

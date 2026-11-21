@@ -4,15 +4,16 @@
 // 元の窓（台本）とのやりとりは usePresentWindow.ts。
 
 import { useEffect, useState } from "react";
-import { Workspace } from "../../App.tsx";
+import { SessionLocked, Workspace } from "../../App.tsx";
 import { type ServerBackend, connectServer } from "../../lib/backend.ts";
 
 export function PresenterApp({ paperId }: { paperId: string }) {
-  const [backend, setBackend] = useState<ServerBackend | null | undefined>(undefined);
+  const [backend, setBackend] = useState<ServerBackend | null | undefined | "locked">(undefined);
   useEffect(() => {
     void connectServer().then((b) => setBackend(b));
   }, []);
   if (backend === undefined) return <div className="welcome" aria-busy="true" />;
+  if (backend === "locked") return <SessionLocked />;
   if (!backend) {
     return (
       <div className="welcome">

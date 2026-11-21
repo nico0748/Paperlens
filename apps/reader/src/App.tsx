@@ -41,13 +41,25 @@ type SaveState = { kind: "idle" | "saving" | "saved" } | { kind: "error"; msg: s
 
 export function App() {
   // ローカルサーバーで動いていればその保存先を使う。単体の HTML として開いたときは、保管庫を選んでもらう
-  const [backend, setBackend] = useState<Backend | null | undefined>(undefined);
+  const [backend, setBackend] = useState<Backend | null | undefined | "locked">(undefined);
   useEffect(() => {
     void connectServer().then((b) => setBackend(b));
   }, []);
   if (backend === undefined) return <div className="welcome" aria-busy="true" />;
+  if (backend === "locked") return <SessionLocked />;
   if (!backend) return <Welcome onOpen={(v) => setBackend(new VaultBackend(v))} />;
   return <Workspace key={backend.name} backend={backend} onClose={backend.kind === "browser" ? () => setBackend(null) : undefined} />;
+}
+
+/** サーバーは動いているが、この画面に合言葉が無い（別のプロセスからの直接の呼び出しを断るため） */
+export function SessionLocked() {
+  return (
+    <div className="welcome">
+      <h1>PaperLens</h1>
+      <p>この画面は認証されていません。PaperLens を起動したときにターミナルに表示された URL（?login= 付き）から開き直してください。</p>
+      <p>デスクトップ版のアプリでは、この画面は出ません。</p>
+    </div>
+  );
 }
 
 type View = "paper" | "graph" | "slides";
